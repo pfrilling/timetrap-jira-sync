@@ -125,7 +125,7 @@ prompt_for_issue_key() {
                 ;;
             *)
                 # Validate issue key format
-                if [[ "$input" =~ ^[A-Z]+-[0-9]+$ ]]; then
+                if [[ "$input" =~ ^[A-Za-z]+-[0-9]+$ ]]; then
                     jira_ticket="$input"
                     break
                 else
