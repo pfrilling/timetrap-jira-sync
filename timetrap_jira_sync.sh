@@ -12,6 +12,8 @@ DATE_FORMAT="%Y-%m-%d"
 TODAY=$(date +"$DATE_FORMAT")
 NON_INTERACTIVE=false
 VERBOSE_MODE=false
+SINGLE_ENTRY_MODE=false
+ENTRY_ID=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -469,8 +471,248 @@ sync_entries() {
 
 }
 
+# Get a specific tiempo entry by ID
+get_single_entry() {
+    local entry_id="$1"
+    log_info "Fetching tiempo entry with ID: $entry_id"
+
+    local entries
+    local cmd_output
+    local cmd_exit_code
+
+    # Get all entries in JSON format and filter by ID
+    cmd_output=$($TIEMPO_CMD d --format=json 2>&1)
+    cmd_exit_code=$?
+
+    if [ $cmd_exit_code -ne 0 ]; then
+        log_error "Command failed with exit code $cmd_exit_code"
+        log_error "Command output: $cmd_output"
+        return 1
+    fi
+
+    log_info "Raw command output received"
+
+    # Check if output is empty
+    if [ -z "$cmd_output" ]; then
+        log_warning "Empty response from timetrap command"
+        return 1
+    fi
+
+    # Try to validate JSON before proceeding
+    if ! echo "$cmd_output" | jq '.' >/dev/null 2>&1; then
+        log_error "Invalid JSON response from timetrap command"
+        return 1
+    fi
+
+    entries="$cmd_output"
+
+    if [ "$entries" = "[]" ] || [ "$entries" = "null" ]; then
+        log_warning "No time entries found"
+        return 1
+    fi
+
+    # Filter for the specific entry ID
+    local single_entry
+    single_entry=$(echo "$entries" | jq --arg id "$entry_id" '.[] | select(.id == ($id | tonumber))')
+
+    if [ -z "$single_entry" ] || [ "$single_entry" = "null" ]; then
+        log_error "No entry found with ID: $entry_id"
+        return 1
+    fi
+
+    log_info "Found entry with ID: $entry_id"
+    echo "$single_entry"
+}
+
+# Process and sync a single entry to Jira
+sync_single_entry() {
+    local entry_json="$1"
+    log_info "Processing single time entry..."
+
+    # Extract fields from JSON
+    local description
+    local start_time
+    local end_time
+
+    description=$(echo "$entry_json" | jq -r '.note // empty')
+    log_info "Extracted description: $description"
+
+    start_time=$(echo "$entry_json" | jq -r '.start // empty')
+    log_info "Extracted start time: $start_time"
+
+    end_time=$(echo "$entry_json" | jq -r '.end // empty')
+    log_info "Extracted end time: $end_time"
+
+    # Calculate duration
+    local duration_seconds=0
+    if [ -n "$start_time" ] && [ -n "$end_time" ]; then
+        # Temporarily disable exit on error for date calculations
+        set +e
+
+        # Use date -d for Linux or gdate for macOS
+        if command -v gdate >/dev/null 2>&1; then
+            # macOS with GNU date installed
+            local end_seconds=$(gdate -d "$end_time" +%s)
+            local start_seconds=$(gdate -d "$start_time" +%s)
+            if [ $? -eq 0 ]; then
+                duration_seconds=$((end_seconds - start_seconds))
+            else
+                log_error "Failed to calculate duration with gdate"
+            fi
+        else
+            # Linux date command
+            local end_seconds
+            local start_seconds
+
+            # Try Linux date format first
+            end_seconds=$(date -d "$end_time" +%s 2>/dev/null)
+            if [ $? -ne 0 ]; then
+                # Try BSD/macOS date format
+                end_seconds=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$end_time" +%s 2>/dev/null)
+                if [ $? -ne 0 ]; then
+                    log_error "Failed to parse end time: $end_time"
+                fi
+            fi
+
+            start_seconds=$(date -d "$start_time" +%s 2>/dev/null)
+            if [ $? -ne 0 ]; then
+                # Try BSD/macOS date format
+                start_seconds=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_time" +%s 2>/dev/null)
+                if [ $? -ne 0 ]; then
+                    log_error "Failed to parse start time: $start_time"
+                fi
+            fi
+
+            if [ -n "$end_seconds" ] && [ -n "$start_seconds" ]; then
+                duration_seconds=$((end_seconds - start_seconds))
+            else
+                log_error "Could not calculate duration due to date parsing errors"
+                duration_seconds=0
+            fi
+        fi
+
+        # Re-enable exit on error
+        set -e
+    fi
+
+    # Temporarily disable exit on error for logging
+    set +e
+    # Ensure duration_seconds is a valid number
+    if [[ "$duration_seconds" =~ ^[0-9]+$ ]]; then
+        log_info "Calculated duration: $duration_seconds seconds"
+    else
+        log_warning "Invalid duration value: '$duration_seconds', setting to 0"
+        duration_seconds=0
+    fi
+    set -e
+
+    # Skip empty descriptions
+    if [ -z "$description" ] || [ "$description" = "null" ]; then
+        log_error "Entry has empty description, cannot sync"
+        return 1
+    fi
+
+    # Parse the entry to extract JIRA ticket and clean description
+    local parsed
+    # Temporarily disable exit on error for parsing
+    set +e
+    parsed=$(parse_time_entry "$description")
+    local parse_status=$?
+    set -e
+
+    log_info "Parsed entry: $parsed"
+    if [ $parse_status -ne 0 ]; then
+        log_error "Failed to parse entry or entry was skipped"
+        return 1
+    fi
+
+    local jira_ticket=$(echo "$parsed" | cut -d'|' -f1)
+    local clean_description=$(echo "$parsed" | cut -d'|' -f2)
+
+    # Convert duration to Jira format
+    local jira_duration
+    jira_duration=$(format_duration "$duration_seconds")
+    log_info "Jira duration: $jira_duration"
+
+    # Format start time for Jira
+    local started_time
+    if command -v gdate >/dev/null 2>&1; then
+        started_time=$(gdate -d "$start_time" +'%Y-%m-%dT%H:%M:00.000%z')
+    else
+        started_time=$(date -d "$start_time" +'%Y-%m-%dT%H:%M:00.000%z' 2>/dev/null ||
+                     date -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_time" +'%Y-%m-%dT%H:%M:00.000%z')
+    fi
+    log_info "Start time for Jira: $started_time"
+
+    log_info "Adding worklog: $jira_ticket - $clean_description ($jira_duration) starting at $started_time"
+
+    # Add worklog to Jira with timeout
+    log_info "Executing Jira command: timeout 30s $JIRA_CMD issue worklog add \"$jira_ticket\" \"$jira_duration\" --comment=\"$clean_description\" --started=\"$started_time\" --no-input"
+
+    # Execute command and capture output and exit code
+    local jira_output
+    local jira_exit_code
+
+    # Temporarily disable exit on error
+    set +e
+    jira_output=$(timeout 30s $JIRA_CMD issue worklog add "$jira_ticket" \
+        "$jira_duration" \
+        --comment="$clean_description" \
+        --started="$started_time" \
+         --no-input 2>&1)
+    jira_exit_code=$?
+
+    if [ $jira_exit_code -eq 0 ]; then
+        log_success "✓ Added worklog to $jira_ticket"
+        set -e
+        return 0
+    else
+        log_error "✗ Failed to add worklog to $jira_ticket (exit code: $jira_exit_code)"
+        log_error "Command output: $jira_output"
+
+        # Additional debugging for timeout
+        if [ $jira_exit_code -eq 124 ]; then
+            log_error "Command timed out after 30 seconds"
+        fi
+
+        set -e
+        return 1
+    fi
+}
+
+# Main function for single entry processing
+main_single_entry() {
+    log_info "Starting single entry sync for entry ID: $ENTRY_ID"
+
+    # Check dependencies
+    check_dependencies
+
+    # Get the specific entry
+    local entry
+    entry=$(get_single_entry "$ENTRY_ID")
+
+    if [ $? -ne 0 ]; then
+        log_error "Failed to retrieve entry with ID: $ENTRY_ID"
+        exit 1
+    fi
+
+    # Sync the entry
+    if sync_single_entry "$entry"; then
+        log_success "Single entry sync completed successfully!"
+    else
+        log_error "Single entry sync failed!"
+        exit 1
+    fi
+}
+
 # Main function
 main() {
+    # Check if we're in single entry mode
+    if [ "$SINGLE_ENTRY_MODE" = true ]; then
+        main_single_entry
+        return
+    fi
+
     log_info "Starting Timetrap to Jira worklog sync for $TODAY"
 
     # Check dependencies
@@ -499,12 +741,14 @@ USAGE:
     $0 [OPTIONS]
 
 OPTIONS:
-    -h, --help      Show this help message
-    -d, --date      Sync entries for specific date (YYYY-MM-DD format)
-                    Default: today
-    -y, --yes       Skip prompts and auto-skip entries without valid format
-                    (non-interactive mode)
-    -v, --verbose   Enable verbose logging (shows detailed progress information)
+    -h, --help           Show this help message
+    -d, --date           Sync entries for specific date (YYYY-MM-DD format)
+                         Default: today
+    -y, --yes            Skip prompts and auto-skip entries without valid format
+                         (non-interactive mode)
+    -v, --verbose        Enable verbose logging (shows detailed progress information)
+    -s, --single-entry   Process only a single tiempo entry (requires -i/--id)
+    -i, --id <ENTRY_ID>  Specify the tiempo entry ID to process (used with -s/--single-entry)
 
 EXAMPLES:
     $0                          # Sync today's entries (interactive)
@@ -513,6 +757,9 @@ EXAMPLES:
     $0 -d 2024-01-15 -y        # Sync specific date in non-interactive mode
     $0 -v                      # Sync today's entries with verbose logging
     $0 -d 2024-01-15 -v        # Sync specific date with verbose logging
+    $0 -s -i 123               # Sync only the tiempo entry with ID 123
+    $0 --single-entry --id 123 # Sync single entry (long form)
+    $0 -s -i 123 -v            # Sync single entry with verbose logging
 
 REQUIREMENTS:
     - tiempo-rs: https://gitlab.com/categulario/tiempo-rs (installed as 't')
@@ -552,6 +799,19 @@ while [[ $# -gt 0 ]]; do
             VERBOSE_MODE=true
             shift
             ;;
+        -s|--single-entry)
+            SINGLE_ENTRY_MODE=true
+            shift
+            ;;
+        -i|--id)
+            if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                ENTRY_ID="$2"
+                shift 2
+            else
+                log_error "Invalid entry ID. Must be a number"
+                exit 1
+            fi
+            ;;
         *)
             log_error "Unknown option: $1"
             show_help
@@ -559,6 +819,19 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate single entry mode arguments
+if [ "$SINGLE_ENTRY_MODE" = true ] && [ -z "$ENTRY_ID" ]; then
+    log_error "-s/--single-entry requires -i/--id <ENTRY_ID>"
+    show_help
+    exit 1
+fi
+
+if [ -n "$ENTRY_ID" ] && [ "$SINGLE_ENTRY_MODE" != true ]; then
+    log_error "-i/--id can only be used with -s/--single-entry"
+    show_help
+    exit 1
+fi
 
 # Run main function
 main
