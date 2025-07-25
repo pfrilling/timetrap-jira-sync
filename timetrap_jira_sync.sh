@@ -25,22 +25,22 @@ NC='\033[0m' # No Color
 # Logging functions
 log_info() {
     if [ "$VERBOSE_MODE" = true ]; then
-        echo -e "${BLUE}[INFO]${NC} $1"
+        echo -e "${BLUE}[INFO]${NC} $1" >&2
     fi
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
 }
 
 log_warning() {
     if [ "$VERBOSE_MODE" = true ]; then
-        echo -e "${YELLOW}[WARNING]${NC} $1"
+        echo -e "${YELLOW}[WARNING]${NC} $1" >&2
     fi
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
 # Check if required commands exist
@@ -402,8 +402,7 @@ sync_entries() {
             log_info "Adding worklog: $jira_ticket - $clean_description ($jira_duration) starting at $started_time"
 
             # Add worklog to Jira with timeout
-            log_info "Executing Jira command: timeout 30s $JIRA_CMD issue worklog add \"$jira_ticket\" \"$jira_duration\" --comment=\"$clean_description\" --started=\"$started_time\" --no-input
-"
+            log_info "Executing Jira command: timeout 30s $JIRA_CMD issue worklog add \"$jira_ticket\" \"$jira_duration\" --comment=\"$clean_description\" --started=\"$started_time\" --no-input"
 
             # Execute command and capture output and exit code
             local jira_output
