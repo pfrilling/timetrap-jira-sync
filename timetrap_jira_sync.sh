@@ -14,6 +14,8 @@ NON_INTERACTIVE=false
 VERBOSE_MODE=false
 SINGLE_ENTRY_MODE=false
 ENTRY_ID=""
+FORCE_SYNC=false
+SYNC_DB_PATH="$HOME/.timetrap_jira_sync.db"
 
 # Colors for output
 RED='\033[0;31m'
@@ -59,14 +61,71 @@ check_dependencies() {
         missing_deps+=("jq")
     fi
 
+    if ! command -v "sqlite3" &> /dev/null; then
+        missing_deps+=("sqlite3")
+    fi
+
     if [ ${#missing_deps[@]} -ne 0 ]; then
         log_error "Missing dependencies: ${missing_deps[*]}"
         log_error "Please install the required tools:"
         log_error "- tiempo-rs: https://gitlab.com/categulario/tiempo-rs"
         log_error "- jira-cli: https://github.com/ankitpokhrel/jira-cli"
         log_error "- jq: for JSON parsing"
+        log_error "- sqlite3: for tracking synced entries"
         exit 1
     fi
+}
+
+# Initialize the sync database
+init_sync_database() {
+    log_info "Initializing sync database at $SYNC_DB_PATH"
+
+    # Create the database and synced_entries table if they don't exist
+    sqlite3 "$SYNC_DB_PATH" <<EOF
+CREATE TABLE IF NOT EXISTS synced_entries (
+    entry_id INTEGER PRIMARY KEY,
+    synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+EOF
+
+    if [ $? -ne 0 ]; then
+        log_error "Failed to initialize sync database"
+        return 1
+    fi
+
+    log_info "Sync database initialized successfully"
+    return 0
+}
+
+# Check if an entry has been synced
+is_entry_synced() {
+    local entry_id="$1"
+
+    # Check if the entry exists in the synced_entries table
+    local result
+    result=$(sqlite3 "$SYNC_DB_PATH" "SELECT COUNT(*) FROM synced_entries WHERE entry_id = $entry_id;")
+
+    if [ "$result" -gt 0 ]; then
+        return 0  # Entry is synced
+    else
+        return 1  # Entry is not synced
+    fi
+}
+
+# Mark an entry as synced
+mark_entry_synced() {
+    local entry_id="$1"
+
+    # Insert the entry into the synced_entries table
+    sqlite3 "$SYNC_DB_PATH" "INSERT OR REPLACE INTO synced_entries (entry_id) VALUES ($entry_id);"
+
+    if [ $? -ne 0 ]; then
+        log_error "Failed to mark entry $entry_id as synced"
+        return 1
+    fi
+
+    log_info "Entry $entry_id marked as synced"
+    return 0
 }
 
 # Parse time entry format: '@JIRA-123: Description'
@@ -244,6 +303,7 @@ sync_entries() {
     local synced_count=0
     local failed_count=0
     local processed_count=0
+    local skipped_count=0
 
     log_info "Processing time entries..."
 
@@ -284,9 +344,20 @@ sync_entries() {
             log_info "Processing JSON: $entry_json"
 
             # Extract fields from JSON
+            local entry_id
             local description
             local start_time
             local end_time
+
+            entry_id=$(echo "$entry_json" | jq -r '.id // empty')
+            log_info "Extracted entry ID: $entry_id"
+
+            # Check if entry has already been synced
+            if [ -n "$entry_id" ] && is_entry_synced "$entry_id" && [ "$FORCE_SYNC" != true ]; then
+                log_success "⚠ ✓ Entry $entry_id has already been synced, skipping"
+                skipped_count=$((skipped_count + 1))
+                continue
+            fi
 
             description=$(echo "$entry_json" | jq -r '.note // empty')
             log_info "Extracted description: $description"
@@ -428,6 +499,11 @@ sync_entries() {
             if [ $jira_exit_code -eq 0 ]; then
                 log_success "✓ Added worklog to $jira_ticket"
                 synced_count=$((synced_count + 1))
+
+                # Mark entry as synced in the database
+                if [ -n "$entry_id" ]; then
+                    mark_entry_synced "$entry_id"
+                fi
             else
                 log_error "✗ Failed to add worklog to $jira_ticket (exit code: $jira_exit_code)"
                 log_error "Command output: $jira_output"
@@ -459,6 +535,9 @@ sync_entries() {
         log_info "Total entries found: $entry_count"
         log_info "Total entries processed: $processed_count"
         log_success "Successfully synced: $synced_count entries"
+        if [ $skipped_count -gt 0 ]; then
+            log_info "Skipped (already synced): $skipped_count entries"
+        fi
         if [ $failed_count -gt 0 ]; then
             log_error "Failed to sync: $failed_count entries"
         fi
@@ -529,9 +608,19 @@ sync_single_entry() {
     log_info "Processing single time entry..."
 
     # Extract fields from JSON
+    local entry_id
     local description
     local start_time
     local end_time
+
+    entry_id=$(echo "$entry_json" | jq -r '.id // empty')
+    log_info "Extracted entry ID: $entry_id"
+
+    # Check if entry has already been synced
+    if [ -n "$entry_id" ] && is_entry_synced "$entry_id" && [ "$FORCE_SYNC" != true ]; then
+        log_success "⚠ ✓ Entry $entry_id has already been synced, skipping"
+        return 0
+    fi
 
     description=$(echo "$entry_json" | jq -r '.note // empty')
     log_info "Extracted description: $description"
@@ -663,6 +752,12 @@ sync_single_entry() {
 
     if [ $jira_exit_code -eq 0 ]; then
         log_success "✓ Added worklog to $jira_ticket"
+
+        # Mark entry as synced in the database
+        if [ -n "$entry_id" ]; then
+            mark_entry_synced "$entry_id"
+        fi
+
         set -e
         return 0
     else
@@ -685,6 +780,9 @@ main_single_entry() {
 
     # Check dependencies
     check_dependencies
+
+    # Initialize the sync database
+    init_sync_database
 
     # Get the specific entry
     local entry
@@ -748,6 +846,7 @@ OPTIONS:
     -v, --verbose        Enable verbose logging (shows detailed progress information)
     -s, --single-entry   Process only a single tiempo entry (requires -i/--id)
     -i, --id <ENTRY_ID>  Specify the tiempo entry ID to process (used with -s/--single-entry)
+    -f, --force          Force sync of entries that have already been synced
 
 EXAMPLES:
     $0                          # Sync today's entries (interactive)
@@ -759,18 +858,22 @@ EXAMPLES:
     $0 -s -i 123               # Sync only the tiempo entry with ID 123
     $0 --single-entry --id 123 # Sync single entry (long form)
     $0 -s -i 123 -v            # Sync single entry with verbose logging
+    $0 -f                      # Force sync of already synced entries
+    $0 -s -i 123 -f            # Force sync of a specific entry even if already synced
 
 REQUIREMENTS:
     - tiempo-rs: https://gitlab.com/categulario/tiempo-rs (installed as 't')
     - jira-cli: https://github.com/ankitpokhrel/jira-cli
     - jq: for JSON parsing
+    - sqlite3: for tracking synced entries
     - Time entries must follow format: '@XXX-123: Description/notes'
 
 SETUP:
     1. Install and configure tiempo-rs
     2. Install and configure jira-cli (run 'jira init')
     3. Install jq: apt-get install jq (Linux) or brew install jq (macOS)
-    4. Make sure this script is executable: chmod +x $0
+    4. Install sqlite3: apt-get install sqlite3 (Linux) or brew install sqlite3 (macOS)
+    5. Make sure this script is executable: chmod +x $0
 EOF
 }
 
@@ -810,6 +913,10 @@ while [[ $# -gt 0 ]]; do
                 log_error "Invalid entry ID. Must be a number"
                 exit 1
             fi
+            ;;
+        -f|--force)
+            FORCE_SYNC=true
+            shift
             ;;
         *)
             log_error "Unknown option: $1"
