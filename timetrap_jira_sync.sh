@@ -32,6 +32,10 @@ log_info() {
     fi
 }
 
+log_info_always() {
+    echo -e "${BLUE}[INFO]${NC} $1" >&2
+}
+
 log_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
 }
@@ -384,7 +388,7 @@ sync_entries() {
 
             # Check if entry has already been synced
             if [ -n "$entry_id" ] && is_entry_synced "$entry_id" && [ "$FORCE_SYNC" != true ]; then
-                log_success "⚠ ✓ Entry $entry_id has already been synced, skipping"
+                log_info_always "⚠ ✓ Entry $entry_id has already been synced, skipping"
                 skipped_count=$((skipped_count + 1))
                 continue
             fi
@@ -648,8 +652,8 @@ sync_single_entry() {
 
     # Check if entry has already been synced
     if [ -n "$entry_id" ] && is_entry_synced "$entry_id" && [ "$FORCE_SYNC" != true ]; then
-        log_success "⚠ ✓ Entry $entry_id has already been synced, skipping"
-        return 0
+        log_info_always "⚠ ✓ Entry $entry_id has already been synced, skipping"
+        return 2  # Return 2 to indicate entry was already synced
     fi
 
     description=$(echo "$entry_json" | jq -r '.note // empty')
@@ -827,8 +831,14 @@ main_single_entry() {
     fi
 
     # Sync the entry
-    if sync_single_entry "$entry"; then
+    sync_single_entry "$entry"
+    local sync_result=$?
+
+    if [ $sync_result -eq 0 ]; then
         log_success "Single entry sync completed successfully!"
+    elif [ $sync_result -eq 2 ]; then
+        # Entry was already synced, don't show success message
+        :
     else
         log_error "Single entry sync failed!"
         exit 1
