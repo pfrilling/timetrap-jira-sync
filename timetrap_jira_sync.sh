@@ -15,6 +15,7 @@ VERBOSE_MODE=false
 SINGLE_ENTRY_MODE=false
 ENTRY_ID=""
 FORCE_SYNC=false
+INIT_MODE=false
 SYNC_DB_PATH="$HOME/.timetrap_jira_sync.db"
 
 # Colors for output
@@ -97,9 +98,32 @@ EOF
     return 0
 }
 
+# Check if the database exists and has the synced_entries table
+check_database_exists() {
+    if [ ! -f "$SYNC_DB_PATH" ]; then
+        return 1  # Database file doesn't exist
+    fi
+
+    # Check if the synced_entries table exists
+    local table_count
+    table_count=$(sqlite3 "$SYNC_DB_PATH" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='synced_entries';" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ "$table_count" -eq 0 ]; then
+        return 1  # Table doesn't exist or error occurred
+    fi
+
+    return 0  # Database and table exist
+}
+
 # Check if an entry has been synced
 is_entry_synced() {
     local entry_id="$1"
+
+    # Check if the database exists first
+    if ! check_database_exists; then
+        log_error "Database not initialized. Please run '$0 init' first."
+        exit 1
+    fi
 
     # Check if the entry exists in the synced_entries table
     local result
@@ -115,6 +139,12 @@ is_entry_synced() {
 # Mark an entry as synced
 mark_entry_synced() {
     local entry_id="$1"
+
+    # Check if the database exists first
+    if ! check_database_exists; then
+        log_error "Database not initialized. Please run '$0 init' first."
+        exit 1
+    fi
 
     # Insert the entry into the synced_entries table
     sqlite3 "$SYNC_DB_PATH" "INSERT OR REPLACE INTO synced_entries (entry_id) VALUES ($entry_id);"
@@ -781,8 +811,11 @@ main_single_entry() {
     # Check dependencies
     check_dependencies
 
-    # Initialize the sync database
-    init_sync_database
+    # Check if the database exists
+    if ! check_database_exists; then
+        log_error "Database not initialized. Please run '$0 init' first."
+        exit 1
+    fi
 
     # Get the specific entry
     local entry
@@ -802,8 +835,30 @@ main_single_entry() {
     fi
 }
 
+# Initialize the database
+main_init() {
+    log_info "Initializing the sync database"
+
+    # Check dependencies
+    check_dependencies
+
+    # Initialize the database
+    if init_sync_database; then
+        log_success "Database initialized successfully at $SYNC_DB_PATH"
+    else
+        log_error "Failed to initialize database"
+        exit 1
+    fi
+}
+
 # Main function
 main() {
+    # Check if we're in init mode
+    if [ "$INIT_MODE" = true ]; then
+        main_init
+        return
+    fi
+
     # Check if we're in single entry mode
     if [ "$SINGLE_ENTRY_MODE" = true ]; then
         main_single_entry
@@ -814,6 +869,12 @@ main() {
 
     # Check dependencies
     check_dependencies
+
+    # Check if the database exists
+    if ! check_database_exists; then
+        log_error "Database not initialized. Please run '$0 init' first."
+        exit 1
+    fi
 
     # Get today's entries
     local entries
@@ -835,7 +896,11 @@ show_help() {
 Tiempo (Timetrap) to Jira Worklog Sync Script
 
 USAGE:
-    $0 [OPTIONS]
+    $0 [COMMAND] [OPTIONS]
+
+COMMANDS:
+    init               Initialize the sync database (must be run before first sync)
+    (default)          Sync time entries with Jira
 
 OPTIONS:
     -h, --help           Show this help message
@@ -849,6 +914,7 @@ OPTIONS:
     -f, --force          Force sync of entries that have already been synced
 
 EXAMPLES:
+    $0 init                    # Initialize the sync database (required before first use)
     $0                          # Sync today's entries (interactive)
     $0 -d 2024-01-15           # Sync entries for January 15, 2024
     $0 -y                      # Sync today's entries (skip invalid entries automatically)
@@ -874,12 +940,17 @@ SETUP:
     3. Install jq: apt-get install jq (Linux) or brew install jq (macOS)
     4. Install sqlite3: apt-get install sqlite3 (Linux) or brew install sqlite3 (macOS)
     5. Make sure this script is executable: chmod +x $0
+    6. Initialize the sync database: $0 init
 EOF
 }
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        init)
+            INIT_MODE=true
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
