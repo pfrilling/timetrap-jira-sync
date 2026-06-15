@@ -49,7 +49,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### confluence-to-md.sh
 
-Reads credentials from the jira-cli config at `~/.config/.jira/.config.yml` (for `login` and `server`) using plain `grep`/`sed` (no yq/python3 needed) and the `JIRA_API_TOKEN` environment variable. Fetches the Confluence REST API (`/wiki/rest/api/content/<PAGE_ID>?expand=body.view,title`) and converts the HTML response to GitHub-flavored Markdown using `pandoc --from html --to gfm-raw_html --wrap none --strip-comments`.
+Reads credentials from the jira-cli config at `~/.config/.jira/.config.yml` (for `login` and `server`) using plain `grep`/`sed` (no yq/python3 needed) and the `JIRA_API_TOKEN` environment variable. Fetches the Confluence REST API (`/wiki/rest/api/content/<PAGE_ID>?expand=body.view,title`) and converts the HTML response to GitHub-flavored Markdown using `pandoc --from html --to gfm+raw_html --wrap none --strip-comments`. The `+raw_html` extension preserves HTML that pandoc cannot convert cleanly (common in Confluence content). Output is written to a temp file and moved into place atomically so a failed conversion never leaves a truncated output file.
 
 ## Dependencies
 

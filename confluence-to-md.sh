@@ -30,7 +30,7 @@ require() {
 # Read a key from the jira-cli YAML config (no yq needed)
 read_config() {
   local key="$1"
-  grep -m1 "^${key}:" "$JIRA_CONFIG" 2>/dev/null | sed "s/^${key}:[[:space:]]*//" | tr -d "'\""
+  grep -m1 "^${key}:" "$JIRA_CONFIG" 2>/dev/null | sed "s/^${key}:[[:space:]]*//" | tr -d "'\"" || true
 }
 
 # ── Validate dependencies ─────────────────────────────────────────────────────
@@ -84,13 +84,17 @@ HTML=$(echo "$RESPONSE" | jq -r '.body.view.value')
 
 echo "Converting to Markdown..."
 
+TMPFILE=$(mktemp)
+trap 'rm -f "$TMPFILE"' EXIT
+
 {
   printf "# %s\n\n" "$TITLE"
   echo "$HTML" | pandoc \
     --from html \
-    --to gfm-raw_html \
+    --to gfm+raw_html \
     --wrap none \
     --strip-comments
-} > "$OUTPUT"
+} > "$TMPFILE"
 
+mv "$TMPFILE" "$OUTPUT"
 echo "Saved: $OUTPUT"
