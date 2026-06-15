@@ -7,7 +7,7 @@
 # Usage:
 #   ./confluence-to-md.sh <PAGE_ID> [output.md]
 #
-# Dependencies: curl, jq, pandoc, python3 (for yq fallback) or yq
+# Dependencies: curl, jq, pandoc
 #
 # Examples:
 #   ./confluence-to-md.sh 123456789
@@ -70,9 +70,10 @@ API_URL="${CONFLUENCE_BASE}/wiki/rest/api/content/${PAGE_ID}?expand=body.view,ti
 echo "Fetching page ${PAGE_ID} from ${CONFLUENCE_BASE}..."
 
 RESPONSE=$(curl --silent --fail \
-  --user "${LOGIN}:${TOKEN}" \
+  --config - \
   --header "Accept: application/json" \
-  "$API_URL") || die "Failed to fetch page. Check the PAGE_ID and your credentials."
+  "$API_URL" \
+  <<< "user = \"${LOGIN}:${TOKEN}\"") || die "Failed to fetch page. Check the PAGE_ID and your credentials."
 
 TITLE=$(echo "$RESPONSE" | jq -r '.title // "Untitled"')
 HTML=$(echo "$RESPONSE" | jq -r '.body.view.value')
