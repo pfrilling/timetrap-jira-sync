@@ -93,6 +93,36 @@ If an entry doesn't follow this format, you'll be prompted to enter a Jira issue
 ./timetrap_jira_sync.sh -f
 ```
 
+## Confluence to Markdown
+
+`confluence-to-md.sh` downloads a Confluence page and converts it to GitHub-flavored Markdown.
+
+### Requirements
+
+- curl
+- jq
+- pandoc
+- jira-cli configured (reuses `~/.config/.jira/.config.yml` for server and login)
+- `JIRA_API_TOKEN` environment variable set
+
+### Usage
+
+```bash
+./confluence-to-md.sh <PAGE_ID> [output.md]
+```
+
+The output file defaults to `confluence-<PAGE_ID>.md` if not specified.
+
+### Examples
+
+```bash
+# Download page to confluence-123456789.md
+./confluence-to-md.sh 123456789
+
+# Download page to a specific file
+./confluence-to-md.sh 123456789 my-page.md
+```
+
 ## Troubleshooting
 
 - If you get errors about invalid JSON, make sure your tiempo-rs installation is working correctly
