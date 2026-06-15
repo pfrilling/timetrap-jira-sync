@@ -91,7 +91,7 @@ trap 'rm -f "$TMPFILE"' EXIT
   printf "# %s\n\n" "$TITLE"
   echo "$HTML" | pandoc \
     --from html \
-    --to gfm+raw_html \
+    --to gfm-raw_html \
     --wrap none \
     --strip-comments
 } > "$TMPFILE"
