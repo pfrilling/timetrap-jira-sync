@@ -204,7 +204,9 @@ ACCOUNT_ID=$(api_get "${SERVER}/rest/api/3/myself" | jq -r '.accountId') \
 [[ -n "$ACCOUNT_ID" && "$ACCOUNT_ID" != "null" ]] || die "Could not determine your Jira accountId."
 log_verbose "accountId $ACCOUNT_ID"
 
-TMPDIR_WORK=$(mktemp -d)
+# BSD/macOS mktemp requires an explicit template, so always pass one.
+TMP_BASE="${TMPDIR:-/tmp}"
+TMPDIR_WORK=$(mktemp -d "${TMP_BASE%/}/jira_timelog_report.XXXXXX")
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
 ISSUES_TSV="$TMPDIR_WORK/issues.tsv"
 ENTRIES_TSV="$TMPDIR_WORK/entries.tsv"
