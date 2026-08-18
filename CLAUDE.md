@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |--------|---------|
 | `timetrap_jira_sync.sh` | Main script: syncs tiempo-rs time entries to Jira worklogs |
 | `confluence-to-md.sh` | Downloads a Confluence page as Markdown |
+| `jira_timelog_report.sh` | Reports Jira worklog hours grouped by project (read-only) |
 
 ## Running the scripts
 
@@ -25,6 +26,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Confluence download
 ./confluence-to-md.sh <PAGE_ID> [output.md]
+
+# Worklog report
+./jira_timelog_report.sh                 # today + this Sat–Fri week, by project
+./jira_timelog_report.sh -D              # add a per-issue breakdown
+./jira_timelog_report.sh -d 2026-08-14   # the Sat–Fri week containing that date
+./jira_timelog_report.sh -w --days       # week totals plus a day-by-day table
+./jira_timelog_report.sh --csv           # machine-readable export
 ```
 
 ## Architecture
@@ -51,6 +59,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Reads credentials from the jira-cli config at `~/.config/.jira/.config.yml` (for `login` and `server`) using plain `grep`/`sed` (no yq/python3 needed) and the `JIRA_API_TOKEN` environment variable. Fetches the Confluence REST API (`/wiki/rest/api/content/<PAGE_ID>?expand=body.view,title`) and converts the HTML response to GitHub-flavored Markdown using `pandoc --from html --to gfm --wrap none --strip-comments`. Output is written to a temp file and moved into place atomically so a failed conversion never leaves a truncated output file.
 
+### jira_timelog_report.sh
+
+**Data flow:** jira-cli config → REST API → TSV → awk aggregation
+
+Read-only reporting. `jira-cli` v1.7.0 only implements `jira issue worklog add` (no read or report
+subcommand), so this script hits the Jira Cloud REST API directly, reusing the credential pattern
+from `confluence-to-md.sh` (`read_config` over `~/.config/.jira/.config.yml` plus
+`$JIRA_API_TOKEN`, passed via `curl --config -` so the token never appears in `ps`).
+
+1. `GET /rest/api/3/myself` → `accountId`
+2. `GET /rest/api/3/search/jql` with `worklogAuthor`/`worklogDate` bounded to the week window,
+   `fields=project`; pages on `nextPageToken`. Project key **and name** come from
+   `.fields.project`, not the issue-key prefix, so moved issues group correctly.
+3. `GET /rest/api/3/issue/<KEY>/worklog?startedAfter=<epoch_ms>` per candidate issue; pages on
+   `startAt`/`total`. `startedAfter` is exclusive, hence the `- 1` on the millisecond value.
+4. Rows are written as `date\tproject_key\tproject_name\tissue_key\tseconds` and aggregated by
+   `awk` (selection-sorted by hours descending, since `asort` is gawk-only).
+
+**Important caveat:** `worklogAuthor`/`worklogDate` in JQL match at the **issue** level, so the
+search is only a candidate filter — an issue it returns may hold worklogs by other authors or
+outside the date window. Exactness comes from the per-worklog `select(.author.accountId == $me)`
+in step 3 and the date re-filter in step 4. Do not "simplify" by trusting the JQL alone.
+
+**Week definition:** weeks run Saturday → Friday. With `%u` as 1=Mon…7=Sun, the days back to the
+week's Saturday is `(dow + 1) % 7` (Sat→0, Sun→1, Mon→2 … Fri→6).
+
+**Cross-platform date handling:** `DATE_KIND` is resolved once (gdate → GNU `date` → BSD `date`)
+and the `date_fmt`, `date_shift`, and `epoch_ms` helpers branch on it — same cascade as
+`timetrap_jira_sync.sh`, but centralized rather than repeated inline.
+
 ## Dependencies
 
 - `t` (tiempo-rs) — time tracker
@@ -58,7 +96,8 @@ Reads credentials from the jira-cli config at `~/.config/.jira/.config.yml` (for
 - `jq` — JSON parsing
 - `sqlite3` — sync state tracking
 - `pandoc` — HTML-to-Markdown conversion (confluence-to-md.sh only)
-- `curl` — HTTP requests (confluence-to-md.sh only)
+- `curl` — HTTP requests (confluence-to-md.sh, jira_timelog_report.sh)
+- `awk` — report aggregation (jira_timelog_report.sh only)
 
 ## Time entry format
 

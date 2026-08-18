@@ -123,6 +123,70 @@ The output file defaults to `confluence-<PAGE_ID>.md` if not specified.
 ./confluence-to-md.sh 123456789 my-page.md
 ```
 
+## Worklog Report
+
+`jira_timelog_report.sh` summarizes the hours you have logged in Jira, grouped by project. It is
+read-only — it never writes to Jira. (`jira-cli` only implements `worklog add`, so the script
+queries the Jira REST API directly.)
+
+Weeks run **Saturday through Friday**.
+
+### Requirements
+
+- curl
+- jq
+- awk
+- jira-cli configured (reuses `~/.config/.jira/.config.yml` for server and login)
+- `JIRA_API_TOKEN` environment variable set
+
+### Usage
+
+```bash
+./jira_timelog_report.sh [OPTIONS]
+```
+
+#### Options:
+- `-h, --help` - Show help message
+- `-d, --date DATE` - Reference date (YYYY-MM-DD); both the daily section and the Sat–Fri week window derive from it. Default: today
+- `-t, --today` - Show only the daily section
+- `-w, --week` - Show only the weekly section
+- `-D, --detail` - Add a per-issue breakdown under each project
+- `--days` - Add a per-day totals table for the week
+- `--csv` - Machine-readable output (`scope,project_key,project_name,issue_key,date,hours`)
+- `-v, --verbose` - Log API activity to stderr
+
+### Examples
+
+```bash
+# Today plus this week, grouped by project
+./jira_timelog_report.sh
+
+# ...with a per-issue breakdown
+./jira_timelog_report.sh -D
+
+# The Sat–Fri week containing a past date
+./jira_timelog_report.sh -d 2026-08-14
+
+# Week totals plus a day-by-day table
+./jira_timelog_report.sh -w --days
+
+# Export for a spreadsheet
+./jira_timelog_report.sh --csv > timelog.csv
+```
+
+Sample output:
+
+```
+Today — 2026-08-18 (Tue)
+  (no time logged)
+
+Week — 2026-08-15 (Sat) .. 2026-08-21 (Fri)
+  ONSA  Oncology Nursing Society Ally    6.25h    6 entries
+  NBT   Non-Billable Time Tracking       1.25h    2 entries
+  RIGA  RI.gov Ally                      0.75h    3 entries
+  ───────────────────────────────────    8.25h   11 entries
+```
+
 ## Troubleshooting
 
 - If you get errors about invalid JSON, make sure your tiempo-rs installation is working correctly
