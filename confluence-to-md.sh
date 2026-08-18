@@ -84,7 +84,9 @@ HTML=$(echo "$RESPONSE" | jq -r '.body.view.value')
 
 echo "Converting to Markdown..."
 
-TMPFILE=$(mktemp)
+# BSD/macOS mktemp requires an explicit template, so always pass one.
+TMP_BASE="${TMPDIR:-/tmp}"
+TMPFILE=$(mktemp "${TMP_BASE%/}/confluence-to-md.XXXXXX")
 trap 'rm -f "$TMPFILE"' EXIT
 
 {
