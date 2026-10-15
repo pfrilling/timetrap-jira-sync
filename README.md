@@ -129,6 +129,10 @@ The output file defaults to `confluence-<PAGE_ID>.md` if not specified.
 read-only — it never writes to Jira. (`jira-cli` only implements `worklog add`, so the script
 queries the Jira REST API directly.)
 
+Worklogs are read from **Tempo** when `TEMPO_API_TOKEN` is set, and from Jira's native worklogs
+otherwise. Prefer Tempo: it is the system of record, and its mirror into Jira can silently miss
+entries (for example, worklogs moved off a Closed issue), so Jira-only totals can come up short.
+
 Weeks run **Saturday through Friday**.
 
 ### Requirements
@@ -138,6 +142,8 @@ Weeks run **Saturday through Friday**.
 - awk
 - jira-cli configured (reuses `~/.config/.jira/.config.yml` for server and login)
 - `JIRA_API_TOKEN` environment variable set
+- `TEMPO_API_TOKEN` environment variable (optional, recommended) — create one under
+  Tempo → Settings → API Integration
 
 ### Usage
 
@@ -153,6 +159,7 @@ Weeks run **Saturday through Friday**.
 - `-D, --detail` - Add a per-issue breakdown under each project
 - `--days` - Add a per-day totals table for the week
 - `--csv` - Machine-readable output (`scope,project_key,project_name,issue_key,date,hours`)
+- `-s, --source SOURCE` - Worklog source, `tempo` or `jira`. Default: `tempo` when `TEMPO_API_TOKEN` is set
 - `-v, --verbose` - Log API activity to stderr
 
 ### Examples
