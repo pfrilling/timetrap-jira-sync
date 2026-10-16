@@ -61,13 +61,26 @@ Reads credentials from the jira-cli config at `~/.config/.jira/.config.yml` (for
 
 ### jira_timelog_report.sh
 
-**Data flow:** jira-cli config → REST API → TSV → awk aggregation
+**Data flow:** jira-cli config → Tempo API (or Jira REST API) → TSV → awk aggregation
 
 Read-only reporting. `jira-cli` v1.7.0 only implements `jira issue worklog add` (no read or report
 subcommand), so this script hits the Jira Cloud REST API directly, reusing the credential pattern
 from `confluence-to-md.sh` (`read_config` over `~/.config/.jira/.config.yml` plus
 `$JIRA_API_TOKEN`, passed via `curl --config -` so the token never appears in `ps`).
 
+**Source selection (`-s tempo|jira`):** defaults to `tempo` when `$TEMPO_API_TOKEN` is set. Tempo
+is the system of record; Jira's native worklogs are only Tempo's mirror and can be missing entries
+(observed: worklogs moved off a Closed issue existed in Tempo but not in Jira). Both fetchers write
+the same TSV, so rendering is source-agnostic.
+
+**Tempo path (`fetch_tempo`):**
+1. `GET /rest/api/3/myself` → `accountId`
+2. `GET https://api.tempo.io/4/worklogs/user/<accountId>?from=&to=` (Bearer token via
+   `curl --config -`); pages by following `metadata.next`. `startDate` is used as the day.
+3. Tempo returns numeric issue ids only, so they are resolved to key + project with
+   `search/jql` `id in (...)`, 100 ids per call. Unresolvable ids are reported under project `?`.
+
+**Jira path (`fetch_jira`):**
 1. `GET /rest/api/3/myself` → `accountId`
 2. `GET /rest/api/3/search/jql` with `worklogAuthor`/`worklogDate` bounded to the week window,
    `fields=project`; pages on `nextPageToken`. Project key **and name** come from
@@ -80,7 +93,7 @@ from `confluence-to-md.sh` (`read_config` over `~/.config/.jira/.config.yml` plu
 **Important caveat:** `worklogAuthor`/`worklogDate` in JQL match at the **issue** level, so the
 search is only a candidate filter — an issue it returns may hold worklogs by other authors or
 outside the date window. Exactness comes from the per-worklog `select(.author.accountId == $me)`
-in step 3 and the date re-filter in step 4. Do not "simplify" by trusting the JQL alone.
+in step 3 and the date re-filter in step 4 (Jira path only). Do not "simplify" by trusting the JQL alone.
 
 **Week definition:** weeks run Saturday → Friday. With `%u` as 1=Mon…7=Sun, the days back to the
 week's Saturday is `(dow + 1) % 7` (Sat→0, Sun→1, Mon→2 … Fri→6).
@@ -97,6 +110,7 @@ and the `date_fmt`, `date_shift`, and `epoch_ms` helpers branch on it — same c
 - `sqlite3` — sync state tracking
 - `pandoc` — HTML-to-Markdown conversion (confluence-to-md.sh only)
 - `curl` — HTTP requests (confluence-to-md.sh, jira_timelog_report.sh)
+- `TEMPO_API_TOKEN` env var — optional, makes jira_timelog_report.sh read from Tempo
 - `awk` — report aggregation (jira_timelog_report.sh only)
 
 ## Time entry format

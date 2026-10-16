@@ -9,6 +9,9 @@
 # jira-cli config (~/.config/.jira/.config.yml) and the JIRA_API_TOKEN
 # environment variable — same approach as confluence-to-md.sh.
 #
+# When TEMPO_API_TOKEN is set, worklogs come from the Tempo API instead, since
+# Tempo is the system of record and its mirror into Jira can be incomplete.
+#
 # Usage:
 #   ./jira_timelog_report.sh [OPTIONS]
 #
@@ -17,6 +20,7 @@
 set -euo pipefail
 
 JIRA_CONFIG="${HOME}/.config/.jira/.config.yml"
+TEMPO_API="https://api.tempo.io/4"
 
 # ── Options ───────────────────────────────────────────────────────────────────
 
@@ -27,6 +31,7 @@ SHOW_DETAIL=false
 SHOW_DAYS=false
 CSV_MODE=false
 VERBOSE=false
+SOURCE=""
 
 # ── Colors (only when stdout is a terminal) ───────────────────────────────────
 
@@ -77,6 +82,8 @@ OPTIONS:
         --days              Add a per-day totals table for the week
         --csv               Machine-readable output:
                             scope,project_key,project_name,issue_key,date,hours
+    -s, --source SOURCE     Worklog source: tempo or jira. Default: tempo when
+                            TEMPO_API_TOKEN is set, otherwise jira
     -v, --verbose           Log API activity to stderr
 
 WEEK DEFINITION:
@@ -93,6 +100,9 @@ EXAMPLES:
 REQUIREMENTS:
     - jira-cli configured (run 'jira init') for $JIRA_CONFIG
     - JIRA_API_TOKEN exported in your shell profile
+    - TEMPO_API_TOKEN (optional, recommended): Tempo → Settings → API Integration.
+      Without it, Jira's native worklogs are used, which can miss entries
+      that Tempo failed to mirror (e.g. on Closed issues)
     - curl, jq, awk
 EOF
 }
@@ -157,6 +167,9 @@ while [[ $# -gt 0 ]]; do
     --days)      SHOW_DAYS=true;   shift ;;
     --csv)       CSV_MODE=true;    shift ;;
     -v|--verbose) VERBOSE=true;    shift ;;
+    -s|--source)
+      [[ $# -ge 2 ]] || die "-s/--source requires 'tempo' or 'jira'."
+      SOURCE="$2"; shift 2 ;;
     *) die "Unknown option: $1 (try --help)" ;;
   esac
 done
@@ -174,6 +187,16 @@ LOGIN="$(read_config login)"
 SERVER="$(read_config server)"
 [[ -n "$LOGIN" ]]  || die "Could not read 'login' from $JIRA_CONFIG"
 [[ -n "$SERVER" ]] || die "Could not read 'server' from $JIRA_CONFIG"
+
+TEMPO_TOKEN="${TEMPO_API_TOKEN:-}"
+if [[ -z "$SOURCE" ]]; then
+  [[ -n "$TEMPO_TOKEN" ]] && SOURCE="tempo" || SOURCE="jira"
+fi
+case "$SOURCE" in
+  tempo) [[ -n "$TEMPO_TOKEN" ]] || die "--source tempo requires TEMPO_API_TOKEN." ;;
+  jira)  ;;
+  *)     die "Invalid source '$SOURCE'. Expected 'tempo' or 'jira'." ;;
+esac
 
 # ── Resolve the date window ───────────────────────────────────────────────────
 
@@ -199,10 +222,15 @@ api_get() {
     <<< "user = \"${LOGIN}:${TOKEN}\""
 }
 
+tempo_get() {
+  curl --silent --fail --config - --header "Accept: application/json" "$1" \
+    <<< "header = \"Authorization: Bearer ${TEMPO_TOKEN}\""
+}
+
 ACCOUNT_ID=$(api_get "${SERVER}/rest/api/3/myself" | jq -r '.accountId') \
   || die "Failed to authenticate against $SERVER. Check JIRA_API_TOKEN."
 [[ -n "$ACCOUNT_ID" && "$ACCOUNT_ID" != "null" ]] || die "Could not determine your Jira accountId."
-log_verbose "accountId $ACCOUNT_ID"
+log_verbose "accountId $ACCOUNT_ID, source $SOURCE"
 
 # BSD/macOS mktemp requires an explicit template, so always pass one.
 TMP_BASE="${TMPDIR:-/tmp}"
@@ -213,45 +241,93 @@ ENTRIES_TSV="$TMPDIR_WORK/entries.tsv"
 : > "$ISSUES_TSV"
 : > "$ENTRIES_TSV"
 
-# Candidate issues: worklogDate/worklogAuthor match at the *issue* level, so
-# this only narrows the set — the exact author/date filter happens per worklog.
-JQL="worklogAuthor = \"${ACCOUNT_ID}\" AND worklogDate >= \"${WEEK_START}\" AND worklogDate <= \"${WEEK_END}\""
-log_verbose "JQL: $JQL"
+# Writes date\tproject_key\tproject_name\tissue_key\tseconds rows to $ENTRIES_TSV.
 
-PAGE_TOKEN=""
-while :; do
-  url="${SERVER}/rest/api/3/search/jql?jql=$(urlencode "$JQL")&fields=project&maxResults=100"
-  [[ -n "$PAGE_TOKEN" ]] && url+="&nextPageToken=$(urlencode "$PAGE_TOKEN")"
-  page=$(api_get "$url") || die "Issue search failed. Check your credentials and JQL support."
-  jq -r '.issues[]? | [.key, .fields.project.key, .fields.project.name] | @tsv' <<< "$page" >> "$ISSUES_TSV"
-  PAGE_TOKEN=$(jq -r '.nextPageToken // empty' <<< "$page")
-  [[ -n "$PAGE_TOKEN" ]] || break
-  log_verbose "paging issue search…"
-done
-
-ISSUE_COUNT=$(wc -l < "$ISSUES_TSV" | tr -d ' ')
-log_verbose "$ISSUE_COUNT candidate issue(s)"
-
-# startedAfter is exclusive, so step back 1ms from the window's midnight.
-STARTED_AFTER=$(( $(epoch_ms "$WEEK_START") - 1 ))
-
-while IFS=$'\t' read -r issue_key project_key project_name; do
-  [[ -n "$issue_key" ]] || continue
-  start_at=0
-  while :; do
-    wl=$(api_get "${SERVER}/rest/api/3/issue/${issue_key}/worklog?startedAfter=${STARTED_AFTER}&startAt=${start_at}&maxResults=1000") \
-      || die "Failed to fetch worklogs for $issue_key."
-    jq -r --arg me "$ACCOUNT_ID" --arg ik "$issue_key" --arg pk "$project_key" --arg pn "$project_name" '
-      .worklogs[]? | select(.author.accountId == $me)
-      | [ (.started[0:10]), $pk, $pn, $ik, .timeSpentSeconds ] | @tsv' <<< "$wl" >> "$ENTRIES_TSV"
-    total=$(jq -r '.total // 0' <<< "$wl")
-    got=$(jq -r '.worklogs | length' <<< "$wl")
-    start_at=$(( start_at + got ))
-    (( got > 0 && start_at < total )) || break
-    log_verbose "paging worklogs for $issue_key ($start_at/$total)"
+# Tempo is the system of record: it mirrors worklogs into Jira, but the mirror
+# can be missing entries (e.g. on Closed issues), so prefer it when available.
+fetch_tempo() {
+  local raw="$TMPDIR_WORK/tempo.tsv" ids="$TMPDIR_WORK/issue_ids.txt" page
+  local url="${TEMPO_API}/worklogs/user/${ACCOUNT_ID}?from=${WEEK_START}&to=${WEEK_END}&limit=1000"
+  : > "$raw"
+  while [[ -n "$url" ]]; do
+    page=$(tempo_get "$url") || die "Tempo worklog fetch failed. Check TEMPO_API_TOKEN."
+    jq -r '.results[]? | [.startDate, (.issue.id | tostring), .timeSpentSeconds] | @tsv' <<< "$page" >> "$raw"
+    url=$(jq -r '.metadata.next // empty' <<< "$page")
+    [[ -n "$url" ]] && log_verbose "paging Tempo worklogs…"
   done
-  log_verbose "fetched worklogs for $issue_key"
-done < "$ISSUES_TSV"
+  log_verbose "$(wc -l < "$raw" | tr -d ' ') Tempo worklog(s)"
+
+  # Tempo only returns numeric issue ids; resolve key and project via Jira,
+  # 100 ids per search (one page at maxResults=100).
+  cut -f2 "$raw" | sort -u > "$ids"
+  local -a all=()
+  while IFS= read -r id; do all+=("$id"); done < "$ids"
+  local i jql chunk
+  for (( i = 0; i < ${#all[@]}; i += 100 )); do
+    chunk=$(IFS=,; echo "${all[*]:i:100}")
+    jql="id in (${chunk})"
+    page=$(api_get "${SERVER}/rest/api/3/search/jql?jql=$(urlencode "$jql")&fields=project&maxResults=100") \
+      || die "Issue lookup failed for Tempo worklogs."
+    jq -r '.issues[]? | [.id, .key, .fields.project.key, .fields.project.name] | @tsv' <<< "$page" >> "$ISSUES_TSV"
+  done
+
+  # Ids Jira won't resolve (deleted issue, no permission) still count, under "?".
+  awk -F'\t' 'BEGIN { OFS = "\t" }
+    FILENAME == ARGV[1] { key[$1] = $2; pk[$1] = $3; pn[$1] = $4; next }
+    {
+      id = $2
+      if (id in key) print $1, pk[id], pn[id], key[id], $3
+      else           print $1, "?", "(unresolved issue)", "id:" id, $3
+    }' "$ISSUES_TSV" "$raw" > "$ENTRIES_TSV"
+}
+
+# Fallback: Jira's native worklogs (only what Tempo has mirrored).
+fetch_jira() {
+  # Candidate issues: worklogDate/worklogAuthor match at the *issue* level, so
+  # this only narrows the set — the exact author/date filter happens per worklog.
+  local jql="worklogAuthor = \"${ACCOUNT_ID}\" AND worklogDate >= \"${WEEK_START}\" AND worklogDate <= \"${WEEK_END}\""
+  log_verbose "JQL: $jql"
+
+  local page_token="" url page
+  while :; do
+    url="${SERVER}/rest/api/3/search/jql?jql=$(urlencode "$jql")&fields=project&maxResults=100"
+    [[ -n "$page_token" ]] && url+="&nextPageToken=$(urlencode "$page_token")"
+    page=$(api_get "$url") || die "Issue search failed. Check your credentials and JQL support."
+    jq -r '.issues[]? | [.key, .fields.project.key, .fields.project.name] | @tsv' <<< "$page" >> "$ISSUES_TSV"
+    page_token=$(jq -r '.nextPageToken // empty' <<< "$page")
+    [[ -n "$page_token" ]] || break
+    log_verbose "paging issue search…"
+  done
+  log_verbose "$(wc -l < "$ISSUES_TSV" | tr -d ' ') candidate issue(s)"
+
+  # startedAfter is exclusive, so step back 1ms from the window's midnight.
+  local started_after=$(( $(epoch_ms "$WEEK_START") - 1 ))
+  local issue_key project_key project_name start_at wl total got
+
+  while IFS=$'\t' read -r issue_key project_key project_name; do
+    [[ -n "$issue_key" ]] || continue
+    start_at=0
+    while :; do
+      wl=$(api_get "${SERVER}/rest/api/3/issue/${issue_key}/worklog?startedAfter=${started_after}&startAt=${start_at}&maxResults=1000") \
+        || die "Failed to fetch worklogs for $issue_key."
+      jq -r --arg me "$ACCOUNT_ID" --arg ik "$issue_key" --arg pk "$project_key" --arg pn "$project_name" '
+        .worklogs[]? | select(.author.accountId == $me)
+        | [ (.started[0:10]), $pk, $pn, $ik, .timeSpentSeconds ] | @tsv' <<< "$wl" >> "$ENTRIES_TSV"
+      total=$(jq -r '.total // 0' <<< "$wl")
+      got=$(jq -r '.worklogs | length' <<< "$wl")
+      start_at=$(( start_at + got ))
+      (( got > 0 && start_at < total )) || break
+      log_verbose "paging worklogs for $issue_key ($start_at/$total)"
+    done
+    log_verbose "fetched worklogs for $issue_key"
+  done < "$ISSUES_TSV"
+}
+
+if [[ "$SOURCE" == "tempo" ]]; then
+  fetch_tempo
+else
+  fetch_jira
+fi
 
 # Trim to the window: an issue matched by JQL can still carry worklogs outside it.
 awk -F'\t' -v ws="$WEEK_START" -v we="$WEEK_END" '$1 >= ws && $1 <= we' "$ENTRIES_TSV" \
