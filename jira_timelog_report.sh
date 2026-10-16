@@ -273,7 +273,7 @@ fetch_tempo() {
 
   # Ids Jira won't resolve (deleted issue, no permission) still count, under "?".
   awk -F'\t' 'BEGIN { OFS = "\t" }
-    NR == FNR { key[$1] = $2; pk[$1] = $3; pn[$1] = $4; next }
+    FILENAME == ARGV[1] { key[$1] = $2; pk[$1] = $3; pn[$1] = $4; next }
     {
       id = $2
       if (id in key) print $1, pk[id], pn[id], key[id], $3
